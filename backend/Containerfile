@@ -3,14 +3,28 @@ FROM registry.access.redhat.com/ubi10/go-toolset:10.0 AS builder
 
 WORKDIR /opt/app-root/src
 
+# Install patched Go version to fix CVE-2025-58183 and CVE-2025-61729
+# UBI go-toolset may have Go 1.24.6, we need 1.24.11+ or 1.25.5+
+USER 0
+RUN microdnf install -y wget tar && \
+    wget -q https://go.dev/dl/go1.24.11.linux-amd64.tar.gz && \
+    rm -rf /usr/local/go && \
+    tar -C /usr/local -xzf go1.24.11.linux-amd64.tar.gz && \
+    rm go1.24.11.linux-amd64.tar.gz && \
+    microdnf clean all
+ENV PATH=/usr/local/go/bin:$PATH
+USER 1001
+
+# Verify Go version
+RUN go version
+
 # Download dependencies (layer cached)
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy source and build (copy everything so tests/extra files are included)
-COPY . .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-  go build -trimpath -ldflags="-s -w" -o guestbook-api .
+# Copy source and build
+COPY main.go .
+RUN CGO_ENABLED=0 go build -o backend
 
 # ---------- Runtime stage ----------
 FROM registry.access.redhat.com/ubi10-minimal:10.0
