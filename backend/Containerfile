@@ -1,0 +1,33 @@
+# ---------- Build stage ----------
+FROM registry.access.redhat.com/ubi10/go-toolset:10.0 AS builder
+
+WORKDIR /opt/app-root/src
+
+# Download dependencies (layer cached)
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source and build (copy everything so tests/extra files are included)
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags="-s -w" -o guestbook-api .
+
+# ---------- Runtime stage ----------
+FROM registry.access.redhat.com/ubi10-minimal:10.0
+
+WORKDIR /app
+
+# Copy binary from builder
+COPY --from=builder /opt/app-root/src/guestbook-api ./guestbook-api
+
+# Note: UBI minimal already includes basic certs, but we can ensure they are there
+# Microdnf is the package manager for UBI minimal
+USER 0
+RUN microdnf install -y ca-certificates && microdnf clean all
+USER 1001
+
+EXPOSE 8080
+
+ENV PORT=8080
+CMD ["./guestbook-api"]
+
