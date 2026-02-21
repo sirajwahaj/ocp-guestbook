@@ -1,47 +1,37 @@
-# ---------- Build stage ----------
-FROM registry.access.redhat.com/ubi10/go-toolset:10.0 AS builder
+# ---------- Builder ----------
+FROM golang:1.24.11 AS builder
 
-WORKDIR /opt/app-root/src
+WORKDIR /app
 
-# Install patched Go version to fix CVE-2025-58183 and CVE-2025-61729
-# UBI go-toolset may have Go 1.24.6, we need 1.24.11+ or 1.25.5+
-USER 0
-RUN microdnf install -y wget tar && \
-    wget -q https://go.dev/dl/go1.24.11.linux-amd64.tar.gz && \
-    rm -rf /usr/local/go && \
-    tar -C /usr/local -xzf go1.24.11.linux-amd64.tar.gz && \
-    rm go1.24.11.linux-amd64.tar.gz && \
-    microdnf clean all
-ENV PATH=/usr/local/go/bin:$PATH
-USER 1001
-
-# Verify Go version
-RUN go version
-
-# Download dependencies (layer cached)
+# Download deps first (better caching)
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy source and build
-COPY main.go .
-RUN CGO_ENABLED=0 go build -o backend
+# Copy source
+COPY . .
 
-# ---------- Runtime stage ----------
+# Build static binary (better for containers)
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH \
+    go build \
+    -ldflags="-s -w -extldflags '-static'" \
+    -trimpath \
+    -o guestbook-api .
+
+# ---------- Runtime ----------
 FROM registry.access.redhat.com/ubi10-minimal:10.0
 
 WORKDIR /app
 
-# Copy binary from builder
-COPY --from=builder /opt/app-root/src/guestbook-api ./guestbook-api
-
-# Note: UBI minimal already includes basic certs, but we can ensure they are there
-# Microdnf is the package manager for UBI minimal
+# Install CA certs only
 USER 0
-RUN microdnf install -y ca-certificates && microdnf clean all
+RUN dnf install -y ca-certificates && \
+    dnf clean all
 USER 1001
 
+# Copy only compiled binary
+COPY --from=builder /app/guestbook-api .
+
 EXPOSE 8080
-
 ENV PORT=8080
-CMD ["./guestbook-api"]
 
+CMD ["./guestbook-api"]
