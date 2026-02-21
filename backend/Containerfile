@@ -22,10 +22,6 @@ FROM registry.access.redhat.com/ubi10-minimal:10.0
 
 WORKDIR /app
 
-# Install CA certs only
-USER 0
-RUN dnf install -y ca-certificates && \
-    dnf clean all
 USER 1001
 
 # Copy only compiled binary
