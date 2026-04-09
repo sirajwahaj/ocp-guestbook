@@ -1,0 +1,180 @@
+# Portfolio: Distributed Guestbook on OpenShift/Podman
+
+> *A journey from local containerization to cloud-native excellence.*
+
+## 📖 Introduction
+This project involves building and deploying a modern, multi-tier "Guestbook" application. The goal is to demonstrate core cloud-native principles: containerization, service discovery, configuration management, and caching.
+
+### The Architecture
+```mermaid
+graph TD
+    User([Internet/Localhost]) --> Frontend[Nginx Frontend]
+    Frontend --> Backend[Golang API]
+    Backend --> Redis[(Redis Cache)]
+    Backend --> PostgreSQL[(PostgreSQL DB)]
+```
+
+---
+
+## 🚀 The Journey: Step-by-Step
+
+### Phase 1: Planning for OpenShift
+Initially, the focus was on deploying directly to OpenShift. I planned for `ConfigMaps`, `Secrets`, and `PersistentVolumeClaims`.
+- **Key Decision**: Using **Red Hat Universal Base Images (UBI)**. This is non-negotiable for professional OpenShift deployments due to security and support.
+
+### Phase 2: Pivoting to Local Podman
+The requirement shifted to getting the stack running locally on Podman first, without using `podman-compose`. This forced a deeper understanding of container networking and volume mounting.
+
+### Phase 3: Solving the "Architecture Wall"
+Since the host machine is an **ARM64 (Apple Silicon)** Mac, but the initial instructions were AMD64-centric, we hit several stumbling blocks.
+
+---
+
+## 🛠 Engineering Journal: Troubleshooting & Breakthroughs
+
+BehindEvery successful deployment is a trail of errors and lessons. Here is the chronological log of every "Wall" we hit and how we climbed over it.
+
+### 1. The "Missing Lockfile" Error
+*   **The Error**: `copier: stat: "/go.sum": no such file or directory` during `COPY go.mod go.sum ./`.
+*   **The "Why"**: Go uses [go.sum](file:///Users/sirajulhaqwahaj/ocp-guestbook/backend/go.sum) to verify dependency integrity. Since this was a fresh project, the lockfile hadn't been generated yet.
+*   **The Solution**: Ran `go mod tidy` in the `backend/` directory to download dependencies and generate the [go.sum](file:///Users/sirajulhaqwahaj/ocp-guestbook/backend/go.sum) file.
+*   **The Learning**: Always ensure your local environment is "tidied" before building a container, or your `COPY` instructions will fail.
+
+### 2. The "UBI Permission" Wall
+*   **The Error**: `open backend: permission denied` during the build phase.
+*   **The "Why"**: Most Docker tutorials use `/app`. However, Red Hat UBI images are "Secure by Default"—they run as a non-root user (UID 1001). This user does not have permission to write to root-owned directories like `/app`.
+*   **The Solution**: Switched the `WORKDIR` to `/opt/app-root/src`, which is the pre-configured, writable workspace for the UBI Go toolset.
+*   **The Learning**: Never assume root access in production-grade images (like OpenShift images). Always use the established conventions of the base image.
+
+### 3. The "Ghost in the Machine" (Architecture Mismatch)
+*   **The Error**: `Illegal Instruction` (Backend crash immediately after start).
+*   **The "Why"**: The original [Containerfile](file:///Users/sirajulhaqwahaj/ocp-guestbook/redis/Containerfile) forced `GOARCH=amd64`. Since we are building on an **ARM64 Mac**, the binary was literally written in a language the CPU didn't understand. 
+*   **The Solution**: Removed the hardcoded `GOARCH=amd64` from the `RUN` command. By leaving it out, the Go compiler automatically detects the host architecture.
+*   **The Alternative**: We could have used Podman's `--platform linux/amd64` flag, but that would use slow emulation. Native ARM64 is much faster.
+
+### 4. The "Silent Nginx" Failure
+*   **The Error**: Frontend container started but exited immediately with status 0.
+*   **The "Why"**: The Nginx image from Red Hat is designed as a "Source-to-Image" (S2I) builder. Without an explicit `CMD`, it doesn't know it needs to keep the Nginx daemon running in the foreground.
+*   **The Solution**: Added `CMD ["nginx", "-g", "daemon off;"]` to the [Containerfile](file:///Users/sirajulhaqwahaj/ocp-guestbook/redis/Containerfile) and ensured the config was copied to `/etc/nginx/nginx.conf`.
+*   **The Learning**: "Builder" images often behave differently than "Runtime" images. Read the documentation for your base image carefully.
+
+### 5. The "Network Discovery" Gap
+*   **The Error**: `curl: (7) Failed to connect to localhost port 8080`.
+*   **The "Why"**: Port mapping (`-p 8080:8080`) was missing in the initial run command, and the containers weren't all on the same network.
+*   **The Solution**: Explicitly mapped the port for the frontend and ensured every container joined the `guestbook-net` network.
+*   **The Learning**: Container IP addresses change. Use **Container Names** (e.g., `http://backend`) and a shared network for reliable communication.
+
+### 6. The "Missing Route" Proxy Error
+*   **The Error**: `404 Not Found` when hitting `localhost:8080/health`.
+*   **The "Why"**: Nginx was serving active files, but didn't have a "rule" to forward `/health` to the backend. It only had a rule for `/api/`.
+*   **The Solution**: Added a `location /health` block to [nginx.conf](file:///Users/sirajulhaqwahaj/ocp-guestbook/frontend/nginx.conf) that proxies to the backend.
+*   **The Learning**: A reverse proxy is only as smart as its configuration file. If you add a new endpoint to your API, you must also add it to your Nginx proxy.
+
+### 7. The "Action Repository Not Found" Error
+*   **The Error**: `Error: Unable to resolve action actions/setup-buildx-action, repository not found.`
+*   **The "Why"**: While many actions are under the `actions/` namespace (like `checkout` or `setup-go`), the Buildx and QEMU actions are maintained by Docker under the `docker/` namespace.
+*   **The Solution**: Corrected the paths to `docker/setup-qemu-action` and `docker/setup-buildx-action`.
+*   **The Learning**: Always double-check the "owner" of an action in the GitHub Marketplace. Not all official-looking actions are in the `actions/` organization.
+
+---
+
+## 🐹 Golang: A Deep Dive for Beginners
+
+Go (Golang) was chosen for the backend because it's the language of the cloud (Kubernetes and OpenShift are written in it!).
+
+### Why Go?
+1. **Static Binaries**: Go compiles into a single executable file. No need to install a "runtime" (like Node.js or Python) in your container.
+2. **Speed**: It performs close to C/C++, but feels like a higher-level language.
+3. **Concurrency**: Built-in "Goroutines" make it easy to handle thousands of users at once.
+
+### Multi-Stage Builds (Our Secret Sauce)
+Look at our [backend/Containerfile](file:///Users/sirajulhaqwahaj/ocp-guestbook/backend/Containerfile). We use two `FROM` lines.
+- **Stage 1 (The Factory)**: We use the large `go-toolset` image (~1GB) to build the code.
+- **Stage 2 (The Delivery)**: We copy ONLY the resulting binary into a tiny `ubi-minimal` image (~80MB).
+- **Result**: A smaller, faster, and more secure production image.
+
+---
+
+## 🔍 Technical Deep Dive
+
+### 1. Nginx: The Gatekeeper
+In this architecture, the Frontend (Nginx) does more than just serve HTML. It acts as a **Reverse Proxy**.
+- **The Problem**: The browser tries to call `/api/entries`. But the frontend container doesn't know what that is.
+- **The Solution**: We configured a `location /api/` block in [nginx.conf](file:///Users/sirajulhaqwahaj/ocp-guestbook/frontend/nginx.conf):
+```nginx
+location /api/ {
+    proxy_pass http://backend; # Forwards request to the 'backend' container
+    proxy_set_header Host $host;
+}
+```
+- **Local vs Cloud DNS**: In OpenShift, DNS names like `backend` are automatically resolved. Locally, we use `podman network create` to simulate this behavior, allowing Nginx to "find" the backend by its container name.
+
+### 2. Backend: Cache Invalidation Logic
+A common "Cache Strategy" is implemented in [main.go](file:///Users/sirajulhaqwahaj/ocp-guestbook/backend/main.go).
+- **Read-Path**: When a user asks for entries, the code checks Redis first (**Cache Hit**). If empty, it goes to Postgres (**Cache Miss**) and then saves the result to Redis for the next person.
+- **Write-Path (The Critical Part)**: When a new guestbook entry is added, we **MUST** delete the old cache:
+```go
+// Invalidera cache
+if app.Redis != nil {
+    app.Redis.Del(app.Ctx, "entries:all")
+}
+```
+- **Why?** If we didn't do this, users wouldn't see their new post for 30 seconds (or until the cache expired). This is called "Cache Invalidation".
+
+### 3. Podman & Volumes (The SELinux Mystery)
+When running the database, we used the flag `-v ~/guestbook-data/pgdata:/var/lib/pgsql/data:Z`.
+- **What is `:Z`?**: This is an SELinux relabeling flag.
+- **Why?**: On many Linux systems (including Fedora/RHEL which OpenShift uses), SELinux prevents containers from reading files on the host for security. The `:Z` flag tells Podman to "relabel" the host directory so the container is allowed to write to it.
+- **What happens without it?**: The database would crash with a `Permission Denied` error when trying to initialize its data files, even if you ran as root!
+
+## 🌍 Environment Variable Management
+
+Managing configurations like database passwords and API keys is a critical part of DevOps. We have explored three ways to do this:
+
+### 1. CLI Flags (Current Local Method)
+Instead of a separate file, we pass variables directly in the terminal using the `-e` flag.
+- **Why?**: It makes the command "self-contained" and easier to copy-paste directly into the terminal without needing to create extra files first.
+- **Podman usage**: `podman run -e KEY=VALUE ...`
+- **Maintenance**: Good for quick labs, but can become messy if you have 20+ variables.
+
+### 2. The `.env` File (Alternative)
+A text file with `KEY=VALUE` pairs that can be loaded all at once.
+- **Podman usage**: `podman run --env-file .env ...`
+- **Value**: Keeps the command clean and allows for sharing a template ([.env.example](file:///Users/sirajulhaqwahaj/ocp-guestbook/.env.example)) with other developers.
+
+### 2. ConfigMaps (OpenShift Configuration)
+For non-sensitive data (like `DB_HOST` or `LOG_LEVEL`), OpenShift uses **ConfigMaps**. These are central dictionaries in the cluster that your application can read.
+
+### 3. Secrets (OpenShift Security)
+For sensitive data (like `DB_PASSWORD` or `API_TOKENS`), OpenShift uses **Secrets**. These are encrypted at rest and only exposed to the specific pods that need them.
+
+| Method | Best For | Risk |
+|:---|:---|:---|
+| `.env` | Local Dev | High (if committed to Git) |
+| ConfigMap | Non-sensitive Cloud Config | Low |
+| Secret | Passwords, Keys, Tokens | Lowest (Encrypted) |
+
+## 🏗 Architectural Evolution: Separation of Concerns
+
+As we move toward automated deployments on OpenShift, we are adopting a key industry principle: **Separation of Concerns (SoC)**.
+
+### Why Two Repositories?
+Starting Thursday, we will split our work into two distinct Git repositories:
+1.  **Application Repo (This one)**: Contains source code, `Containerfiles`, and CI workflows. This repo cares about *how the app is built*.
+2.  **Infrastructure Repo**: Contains Kubernetes/OpenShift manifests (`Deployment`, `Service`, `Route`). This repo cares about *how the app is run*.
+
+### The Benefit: GitOps
+By separating the configuration from the code, we enable **GitOps** (using ArgoCD). This means:
+- **Security**: Developers can push code without needing access to production cluster credentials.
+- **Auditability**: Every change to the infrastructure is tracked in its own Git history.
+- **Stability**: Reverting a deployment is as simple as reverting a Git commit in the infra repo, without touching the code.
+
+## 💡 Lessons Learned
+...
+
+## 🔮 Next Steps: CI/CD Mastery
+Next week, we will automate this whole process using **GitHub Actions**. Instead of typing `podman build` manually, a robot will do it for us every time we push code!
+
+---
+*Documentation Version: 1.0.0*
+*Last Updated: 2026-01-20*

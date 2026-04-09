@@ -1,0 +1,26 @@
+apiVersion: v1
+data:
+  BIGQUERY_DATASET: dev_siraj
+  POSTGRES_DB: dagster_db
+  POSTGRES_HOST: dagster-postgres
+  POSTGRES_PORT: "5432"
+  POSTGRES_USER: dagster_useri
+  GCP_PROJECT_REPLICATION: insighta-reporting-staging
+  SUPABASE_URL: https://rommvkximlsurzduxixq.supabase.co
+kind: ConfigMap
+metadata:
+  annotations:
+    meta.helm.sh/release-name: dagster-staging
+    meta.helm.sh/release-namespace: dagster-ns
+  creationTimestamp: "2026-02-27T12:55:45Z"
+  labels:
+    app.kubernetes.io/component: config
+    app.kubernetes.io/instance: dagster-staging
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: insighta-dagster
+    app.kubernetes.io/version: 1.12.7
+    helm.sh/chart: insighta-dagster-0.1.0
+  name: dagster-instance-env
+  namespace: dagster-ns
+  resourceVersion: "1772196945866335006"
+  uid: 52a723f1-ab3f-43a0-ac5e-f9229ffc9b25
